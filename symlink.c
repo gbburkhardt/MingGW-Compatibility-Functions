@@ -244,10 +244,13 @@ int lstat(const char *path, struct stat *buf)
     buf->st_mtime = st.st_mtime;
     buf->st_ctime = st.st_ctime;
 
-    if (isSymLink(path)) {
+    int is = isSymLink(path);
+    if (is > 0) {
         buf->st_mode |= S_IFLNK;
         // on Linux, links to directories report as regular files
         buf->st_mode &= ~S_IFDIR;
+    } else if (is < 0) {
+        return -1;
     }
 
     return s;
