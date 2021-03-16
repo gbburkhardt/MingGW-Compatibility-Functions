@@ -42,7 +42,14 @@ ssize_t readlink(const char *path, char *buf, size_t bufsiz);
 int lstat(const char *path, struct stat *buf);
 int symlink(const char *oldpath, const char *newpath);
 int link(const char *oldpath, const char *newpath);
-bool isSymLink(const char *path);
+
+
+/* Returns:
+   -1 : failed
+    0 : not a sym link
+    1 : is a sym link
+*/
+int isSymLink(const char *path);
 
 #ifdef __cplusplus
 }

@@ -40,16 +40,20 @@ static void setErrno(const char* funcName)
     switch (err) {
       case ERROR_FILE_NOT_FOUND:    errno = ENOENT;  break;
       case ERROR_ACCESS_DENIED:     errno = EACCES;  break;
+      case ERROR_ALREADY_EXISTS:
       case ERROR_FILE_EXISTS:       errno = EEXIST;  break;
       case ERROR_PATH_NOT_FOUND:    errno = ENAMETOOLONG;  break;
       case ERROR_NOT_ENOUGH_MEMORY: errno = ENOMEM;  break;
+      case ERROR_NOT_SAME_DEVICE:   errno = EPERM;  break;
       default:
         {
-            LPTSTR* msg = 0;
-            FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_FROM_SYSTEM,
-                          0, err, 0, (LPTSTR)msg, 0, 0);
+            char* msg = 0;
+            FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER
+                          |FORMAT_MESSAGE_FROM_SYSTEM
+                          | FORMAT_MESSAGE_IGNORE_INSERTS,
+                          0, err, 0, (LPTSTR)&msg, 0, 0);
             if (msg) {
-                fprintf(stderr, "%s: %s", funcName, *msg);
+                fprintf(stderr, "%s: %s", funcName, msg);
                 LocalFree(msg);
             } else {
                 fprintf(stderr, "%s: error %#lx\n", funcName, err);
@@ -197,19 +201,24 @@ ssize_t readlink(const char *path, char *buf, size_t bufsiz)
     return i;
 }
 
-bool isSymLink(const char *path)
+/* Returns:
+   -1 : failed
+    0 : not a sym link
+    1 : is a sym link
+*/
+int isSymLink(const char *path)
 {
     WIN32_FIND_DATAA wd;
     HANDLE h = FindFirstFile(path, &wd);
     if (h == INVALID_HANDLE_VALUE) {
         setErrno("isSymLink");
-        return false;
+        return -1;
     }
 
     CloseHandle(h);
 
-    return (wd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) 
-        && wd.dwReserved0 == IO_REPARSE_TAG_SYMLINK;
+    return ((wd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) 
+        && (wd.dwReserved0 == IO_REPARSE_TAG_SYMLINK)) ? 1:0;
 }
 
 /*
