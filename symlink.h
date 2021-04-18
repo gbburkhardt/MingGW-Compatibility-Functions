@@ -31,7 +31,7 @@
  */
 
 #define S_IFLNK (S_IFREG | S_IFCHR)
-#define S_ISLNK(m) (m & S_IFMT) == S_IFLNK)
+#define S_ISLNK(m) ((m & S_IFMT) == S_IFLNK)
 
 #ifdef  __cplusplus
 extern "C" {
