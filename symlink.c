@@ -1,26 +1,26 @@
 /*
- Released under MIT License
+  Released under MIT License
 
- Copyright (c) 2021 Glenn Burkhardt.
+  Copyright (c) 2021 Glenn Burkhardt.
 
- Permission is hereby granted, free of charge, to any person obtaining a copy of
- this software and associated documentation files (the "Software"), to deal in
- the Software without restriction, including without limitation the rights to
- use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
- of the Software, and to permit persons to whom the Software is furnished to do
- so, subject to the following conditions:
+  Permission is hereby granted, free of charge, to any person obtaining a copy of
+  this software and associated documentation files (the "Software"), to deal in
+  the Software without restriction, including without limitation the rights to
+  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+  of the Software, and to permit persons to whom the Software is furnished to do
+  so, subject to the following conditions:
 
- The above copyright notice and this permission notice shall be included in all
- copies or substantial portions of the Software.
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
 
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- SOFTWARE.
- */
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+*/
 
 /* Not designed for Unicode filesystems.
  */
@@ -32,6 +32,8 @@
 #include <errno.h>
 #include <windows.h>
 #include "symlink.h"
+
+static int debug;
 
 static void setErrno(const char* funcName)
 {
@@ -53,15 +55,39 @@ static void setErrno(const char* funcName)
                           | FORMAT_MESSAGE_IGNORE_INSERTS,
                           0, err, 0, (LPTSTR)&msg, 0, 0);
             if (msg) {
-                fprintf(stderr, "%s: %s", funcName, msg);
+                fprintf(stderr, "%s: %s (%ld)", funcName, msg, err);
                 LocalFree(msg);
             } else {
-                fprintf(stderr, "%s: error %#lx\n", funcName, err);
+                fprintf(stderr, "%s: error %ld\n", funcName, err);
             }
             errno = EIO;
         }
         break;
     }
+}
+
+// This function is used only to avoid false positive warning from gcc 10
+// re: returning pointer to local buffer.
+static inline
+int getPathAndStripPrefix(HANDLE hPath, char* fn, DWORD buflen)
+{
+    DWORD s = GetFinalPathNameByHandleA(hPath, fn, buflen, FILE_NAME_OPENED);
+    CloseHandle(hPath);
+
+    // return value s doesn't include null terminator; buflen does
+    if (s >= buflen) {
+        fprintf(stderr, "%s:%d> buffer length %ld too small; need %ld",
+                __FILE__, __LINE__, buflen, s);
+        return -1;
+    } else if (s == 0) {
+        setErrno(__func__);
+        return -1;
+    }
+
+    if (!memcmp(fn, "\\\\?\\", 4)){
+        memcpy(fn, fn+4, strlen(fn)+1);
+    }
+    return 0;
 }
 
 char* realpath(const char *path, char *resolved_path)
@@ -71,66 +97,65 @@ char* realpath(const char *path, char *resolved_path)
     HANDLE hPath = CreateFile(path, 0, 0, 0, OPEN_EXISTING, 0, 0);
     if (hPath == INVALID_HANDLE_VALUE) {
         setErrno("realpath");
+        if (debug)
+            fprintf(stderr, "can't open %s: %s\n", path, strerror(errno));
         return 0;
     }
 
     DWORD s;
-    char *fn;
     if (!resolved_path) {
         // get pathname size
         s = GetFinalPathNameByHandleA(hPath, 0, 0, FILE_NAME_OPENED);
         if (!s) {
             setErrno("realpath");
+            if (debug)
+                fprintf(stderr, "can't get final path %s: %s\n", 
+                        path, strerror(errno));
             return 0;
         }
 
-        fn = (char*)malloc(++s);
-    } else {
-        s = sizeof(buf);
-        fn = buf;
-    }
-
-    GetFinalPathNameByHandleA(hPath, fn, s, FILE_NAME_OPENED);
-    CloseHandle(hPath);
-
-    if (s && !memcmp(fn, "\\\\?\\", 4)){
-        memcpy(fn, fn+4, strlen(fn)+1);
-    }
-
-    if (resolved_path) {
-        strcpy(resolved_path, fn);
-        return resolved_path;
-    } else {
+        char *fn = (char*)malloc(++s);
+        int st = getPathAndStripPrefix(hPath, fn, s);
+        if (st) { free(fn);  return 0; }
         return fn;
+    } else {
+        char fn[PATH_MAX+4+1];
+        s = sizeof(fn);
+        int st = getPathAndStripPrefix(hPath, fn, s);
+        if (st) return 0;
+
+        strncpy(resolved_path, fn, PATH_MAX-1);
+        resolved_path[PATH_MAX-1] = 0;
+        return resolved_path;
     }
 }
 
 // https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_reparse_data_buffer
 
 typedef struct _REPARSE_DATA_BUFFER {
-  ULONG  ReparseTag;
-  USHORT ReparseDataLength;
-  USHORT Reserved;
-  union {
-    struct {
-      USHORT SubstituteNameOffset;
-      USHORT SubstituteNameLength;
-      USHORT PrintNameOffset;
-      USHORT PrintNameLength;
-      ULONG  Flags;
-      WCHAR  PathBuffer[1];
-    } SymbolicLinkReparseBuffer;
-    struct {
-      USHORT SubstituteNameOffset;
-      USHORT SubstituteNameLength;
-      USHORT PrintNameOffset;
-      USHORT PrintNameLength;
-      WCHAR  PathBuffer[1];
-    } MountPointReparseBuffer;
-    struct {
-      UCHAR DataBuffer[1];
-    } GenericReparseBuffer;
-  } DUMMYUNIONNAME;
+    ULONG  ReparseTag;
+    USHORT ReparseDataLength;
+    USHORT Reserved;
+    union {
+        struct {
+            USHORT SubstituteNameOffset;
+            USHORT SubstituteNameLength;
+            USHORT PrintNameOffset;
+            USHORT PrintNameLength;
+            ULONG  Flags;
+            WCHAR  PathBuffer[1];
+        } SymbolicLinkReparseBuffer;
+        struct {
+            USHORT SubstituteNameOffset;
+            USHORT SubstituteNameLength;
+            USHORT PrintNameOffset;
+            USHORT PrintNameLength;
+            WCHAR  PathBuffer[1];
+        } MountPointReparseBuffer;
+        struct {
+            UCHAR DataBuffer[1];
+        } GenericReparseBuffer;
+    } DUMMYUNIONNAME;
 } _REPARSE_DATA_BUFFER;
 
 ssize_t readlink(const char *path, char *buf, size_t bufsiz)
@@ -138,17 +163,21 @@ ssize_t readlink(const char *path, char *buf, size_t bufsiz)
     DWORD st = GetFileAttributesA(path);
     if (st == INVALID_FILE_ATTRIBUTES) {
         setErrno("readlink");
+        if (debug)
+            fprintf(stderr, "can't open %s: %s\n", path, strerror(errno));
         return -1;
     }
     if (!(st & FILE_ATTRIBUTE_REPARSE_POINT)) {
         errno = EINVAL;
-        return -1;
+        return -1;      // not a link
     }
 
     HANDLE handle = CreateFileA(path, 0, 0, 0, OPEN_EXISTING,
                                 FILE_FLAG_OPEN_REPARSE_POINT, 0);
     if (handle == INVALID_HANDLE_VALUE) {
         setErrno("readlink");
+        if (debug)
+            fprintf(stderr, "can't open %s: %s\n", path, strerror(errno));
         return -1;
     }
 
@@ -163,6 +192,9 @@ ssize_t readlink(const char *path, char *buf, size_t bufsiz)
 
     if (!s) {
         setErrno("readlink");
+        if (debug)
+            fprintf(stderr, "can't get reparse info for %s: %s\n", 
+                    path, strerror(errno));
         return -1;
     }
 
@@ -186,6 +218,8 @@ ssize_t readlink(const char *path, char *buf, size_t bufsiz)
         break;
       default:
         errno = EINVAL;
+        if (debug)
+            fprintf(stderr, "invalid reparse tag for %s\n", path);
         return -1;
     }
 
@@ -204,8 +238,8 @@ ssize_t readlink(const char *path, char *buf, size_t bufsiz)
 
 /* Returns:
    -1 : failed
-    0 : not a sym link
-    1 : is a sym link
+   0 : not a sym link
+   1 : is a sym link
 */
 int isSymLink(const char *path)
 {
@@ -213,13 +247,16 @@ int isSymLink(const char *path)
     HANDLE h = FindFirstFile(path, &wd);
     if (h == INVALID_HANDLE_VALUE) {
         setErrno("isSymLink");
+        if (debug)
+            fprintf(stderr, "can't get handle for %s: %s\n", 
+                    path, strerror(errno));
         return -1;
     }
 
     CloseHandle(h);
 
     return ((wd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) 
-        && (wd.dwReserved0 == IO_REPARSE_TAG_SYMLINK)) ? 1:0;
+            && (wd.dwReserved0 == IO_REPARSE_TAG_SYMLINK)) ? 1:0;
 }
 
 /*
@@ -274,6 +311,9 @@ int symlink(const char *oldpath, const char *newpath)
         return 0;
     else {
         setErrno("symlink");
+        if (debug)
+            fprintf(stderr, "can't set soft link from %s to %s: %s\n", 
+                    newpath, oldpath, strerror(errno));
         return -1;
     }
 }
@@ -298,6 +338,9 @@ int link(const char *oldpath, const char *newpath)
         return 0;
     else {
         setErrno("link");
+        if (debug)
+            fprintf(stderr, "can't set hard link from %s to %s: %s\n", 
+                    newpath, oldpath, strerror(errno));
         return -1;
     }
 }
