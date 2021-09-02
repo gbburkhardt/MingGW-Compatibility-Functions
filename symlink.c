@@ -92,8 +92,6 @@ int getPathAndStripPrefix(HANDLE hPath, char* fn, DWORD buflen)
 
 char* realpath(const char *path, char *resolved_path)
 {
-    char buf[PATH_MAX+4+1];
-
     HANDLE hPath = CreateFile(path, 0, 0, 0, OPEN_EXISTING, 0, 0);
     if (hPath == INVALID_HANDLE_VALUE) {
         setErrno("realpath");
