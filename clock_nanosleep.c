@@ -26,6 +26,7 @@
 #include <time.h>
 #include <windows.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include "pthread.h"
 #include "pthread_time.h"
 
@@ -94,6 +95,23 @@ static void printLastError(const char* func, int lineno)
     }
 }
 
+static inline
+bool haveHighResTimer()
+{
+    char bn[32];
+    DWORD sz = sizeof(bn);
+
+    // Determine whether Windows version is at least Win 2004
+    int s = RegGetValueA(HKEY_LOCAL_MACHINE, 
+                         "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", 
+                         "CurrentBuildNumber", RRF_RT_REG_SZ, 0, bn, &sz);
+    if (!s) {
+        int curVer = atoi(bn);
+        return (curVer >= Win2004_BUILD_NUMBER);
+    }
+    return false;
+}    
+
 /**
  * Sleep for the specified time.
  * @param  clock_id This argument should always be CLOCK_REALTIME (0).
@@ -114,10 +132,11 @@ int clock_nanosleep(clockid_t clock_id, int flags,
     switch (clock_id) {
       case CLOCK_REALTIME:
 
+        /* TIMER_ABSTIME = 1 */
         if (flags == 0)
             return nanosleep(request, remain);
 
-        /* TIMER_ABSTIME = 1 */
+        // sleep until abs time
         clock_gettime(CLOCK_REALTIME, &tp);
 
         tp.tv_sec = request->tv_sec - tp.tv_sec;
@@ -145,19 +164,11 @@ int clock_nanosleep(clockid_t clock_id, int flags,
         }
 
         // Use high resolution if Windows version is at least Win 2004
-        char bn[32];
-        DWORD sz = sizeof(bn);
-        LSTATUS s = RegGetValueA(HKEY_LOCAL_MACHINE, 
-                             "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", 
-                             "CurrentBuildNumber", RRF_RT_REG_SZ, 0, bn, &sz);
-
-        int timerCreateFlags = CREATE_WAITABLE_TIMER_MANUAL_RESET;
-        if (!s) {
-            int curVer = atoi(bn);
-            if (curVer >= Win2004_BUILD_NUMBER) {
-                timerCreateFlags = CREATE_WAITABLE_TIMER_HIGH_RESOLUTION;
-            }
-        }
+        int timerCreateFlags;
+        if (haveHighResTimer())
+            timerCreateFlags = CREATE_WAITABLE_TIMER_HIGH_RESOLUTION;
+        else
+            timerCreateFlags = CREATE_WAITABLE_TIMER_MANUAL_RESET;
             
         // Create an unnamed waitable timer.
         HANDLE hTimer = CreateWaitableTimerEx(0, 0, timerCreateFlags, TIMER_ALL_ACCESS);
@@ -170,20 +181,20 @@ int clock_nanosleep(clockid_t clock_id, int flags,
         if (remain) clock_gettime(CLOCK_MONOTONIC, &then);
 
         // Set a timer
+        int retval;
         if (!SetWaitableTimer(hTimer, &liDueTime, 0, 0, 0, 0)) {
-            CloseHandle(hTimer);
             printLastError(__func__, __LINE__);
-            return lc_set_errno(ENOTSUP);
+            retval = lc_set_errno(ENOTSUP);
+        } else {
+            // Wait for the timer.
+            DWORD st = WaitForSingleObject(hTimer, INFINITE);
+            if (st != WAIT_OBJECT_0) {
+                printLastError(__func__, __LINE__);
+                retval = lc_set_errno(ENOTSUP);
+            }
+            retval = 0;
         }
-
-        // Wait for the timer.
-        DWORD st = WaitForSingleObject(hTimer, INFINITE);
-        if (st != WAIT_OBJECT_0) {
-            CloseHandle(hTimer);
-            printLastError(__func__, __LINE__);
-            return lc_set_errno(ENOTSUP);
-        }
-
+        
         CloseHandle(hTimer);
 
         struct timespec now, elapsed;
@@ -197,7 +208,7 @@ int clock_nanosleep(clockid_t clock_id, int flags,
             }
         }
 
-        return 0;
+        return retval;
 
       default:
         return lc_set_errno(EINVAL);
@@ -205,7 +216,23 @@ int clock_nanosleep(clockid_t clock_id, int flags,
 }
 
 #ifdef UNIT_TEST
-// gcc -g nanosleep.c -o n -Wall 
+// gcc -DUNIT_TEST -g -O2 clock_nanosleep.c -o n -Wall -lwinmm
+
+typedef NTSTATUS NTAPI (*NtQueryTimerResolution)(PULONG MinimumResolution,
+                                                 PULONG MaximumResolution,
+                                                 PULONG CurrentResolution);
+
+// Returns the current timer resolution in 100 ns units (10,000 implies
+// a one ms timer interval).
+ULONG GetTimerResolution() {
+  HMODULE ntdll = LoadLibraryA("ntdll.dll");
+  NtQueryTimerResolution QueryTimerResolution
+     = (NtQueryTimerResolution)GetProcAddress(ntdll, "NtQueryTimerResolution");
+
+  ULONG minimum, maximum, current;
+  QueryTimerResolution(&minimum, &maximum, &current);
+  return current;
+}
 
 int main(int ac, char**av)
 {
@@ -216,15 +243,28 @@ int main(int ac, char**av)
     if (ac > 1) delayTime.tv_nsec = atoi(av[1]);
     if (ac > 2) iterations = atoi(av[2]);
     
-//    TIMECAPS caps;    // use -lwinmm
-//
-//    int s = timeGetDevCaps(&caps, sizeof(caps));
-//    if (s != TIMERR_NOERROR) perror("timeGetDevCaps");
-//
-//    printf("caps: min %d, max %d\n", caps.wPeriodMin, caps.wPeriodMax);
-//
-//    timeBeginPeriod(caps.wPeriodMin);
-//    
+    if (haveHighResTimer())
+        printf("High Res timer\n");
+    else
+        printf("Old windows version: no high res timer\n");
+
+    ULONG ns100 = GetTimerResolution();
+    double timerRes = ns100/10000.;
+    printf("Timer resolution: %.6f ms\n", timerRes);
+
+    TIMECAPS caps;    // use -lwinmm
+    int s = timeGetDevCaps(&caps, sizeof(caps));
+    if (s != TIMERR_NOERROR) perror("timeGetDevCaps");
+
+    printf("caps: min %d ms, max %d ms\n", caps.wPeriodMin, caps.wPeriodMax);
+
+    if (caps.wPeriodMin > timerRes) {
+        printf("No reason to set min timer resolution\n");
+    } else {
+        timeBeginPeriod(caps.wPeriodMin);
+        printf("Timer res set to minimum\n");
+    }
+    
     clock_gettime(CLOCK_MONOTONIC, &then);
 
     for (int i=0; i < iterations; i++) {
@@ -243,8 +283,6 @@ int main(int ac, char**av)
     printf("expected %.7f sec, %d iterations, %.7f sec delay\n", 
            iterations*dt, iterations, dt);
 
-//    timeEndPeriod(caps.wPeriodMin);
-
     // wait until absolute time
     long long waitTime = delayTime.tv_sec * POW10_9 + delayTime.tv_nsec;
     waitTime *= iterations;
@@ -256,7 +294,7 @@ int main(int ac, char**av)
     struct timespec until;
     timeradd(&until, &then, &delayTime);
 
-    int s = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &delayTime, &remain);
+    s = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &delayTime, &remain);
     if (s) perror("clock_nanosleep");
     
     clock_gettime(CLOCK_MONOTONIC, &now);
