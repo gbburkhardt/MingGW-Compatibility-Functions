@@ -65,18 +65,6 @@ static inline void timersub(struct timespec* c,
     }
 }
 
-static inline void timeradd(struct timespec* c, 
-                            const struct timespec* a,
-                            const struct timespec* b)
-{
-    c->tv_sec = a->tv_sec + b->tv_sec;
-    c->tv_nsec = a->tv_nsec + b->tv_nsec;
-    if (c->tv_nsec >= POW10_9) {
-        c->tv_sec++;
-        c->tv_nsec -= POW10_9;
-    }
-}
-
 static void printLastError(const char* func, int lineno)
 {
     DWORD err = GetLastError();
@@ -94,23 +82,6 @@ static void printLastError(const char* func, int lineno)
         fprintf(stderr, "%s:%d err=%ld: unknown error\n", func, lineno, err);
     }
 }
-
-static inline
-bool haveHighResTimer()
-{
-    char bn[32];
-    DWORD sz = sizeof(bn);
-
-    // Determine whether Windows version is at least Win 2004
-    int s = RegGetValueA(HKEY_LOCAL_MACHINE, 
-                         "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", 
-                         "CurrentBuildNumber", RRF_RT_REG_SZ, 0, bn, &sz);
-    if (!s) {
-        int curVer = atoi(bn);
-        return (curVer >= Win2004_BUILD_NUMBER);
-    }
-    return false;
-}    
 
 /**
  * Sleep for the specified time.
@@ -162,19 +133,16 @@ int clock_nanosleep(clockid_t clock_id, int flags,
         } else {
             liDueTime.QuadPart += DELTA_EPOCH_IN_100NS; // TIMER_ABSTIME
         }
-
-        // Use high resolution if Windows version is at least Win 2004
-        int timerCreateFlags;
-        if (haveHighResTimer())
-            timerCreateFlags = CREATE_WAITABLE_TIMER_HIGH_RESOLUTION;
-        else
-            timerCreateFlags = CREATE_WAITABLE_TIMER_MANUAL_RESET;
             
-        // Create an unnamed waitable timer.
-        HANDLE hTimer = CreateWaitableTimerEx(0, 0, timerCreateFlags, TIMER_ALL_ACCESS);
+        // Create an unnamed waitable timer.  Try first for high res timer.
+        HANDLE hTimer = CreateWaitableTimerEx(0, 0, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
         if (!hTimer) {
-            printLastError(__func__, __LINE__);
-            return lc_set_errno(ENOTSUP);
+            // Try for low res timer
+            hTimer = CreateWaitableTimerEx(0, 0, CREATE_WAITABLE_TIMER_MANUAL_RESET, TIMER_ALL_ACCESS);
+            if (!hTimer) {
+                printLastError(__func__, __LINE__);
+                return lc_set_errno(ENOTSUP);
+            }
         }
     
         struct timespec then;
@@ -217,6 +185,23 @@ int clock_nanosleep(clockid_t clock_id, int flags,
 #ifdef UNIT_TEST
 // gcc -DUNIT_TEST -g -O2 clock_nanosleep.c -o n -Wall -lwinmm
 
+static inline
+bool haveHighResTimer()
+{
+    char bn[32];
+    DWORD sz = sizeof(bn);
+
+    // Determine whether Windows version is at least Win 2004
+    int s = RegGetValueA(HKEY_LOCAL_MACHINE, 
+                         "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", 
+                         "CurrentBuildNumber", RRF_RT_REG_SZ, 0, bn, &sz);
+    if (!s) {
+        int curVer = atoi(bn);
+        return (curVer >= Win2004_BUILD_NUMBER);
+    }
+    return false;
+}    
+
 typedef NTSTATUS NTAPI (*NtQueryTimerResolution)(PULONG MinimumResolution,
                                                  PULONG MaximumResolution,
                                                  PULONG CurrentResolution);
@@ -231,6 +216,18 @@ ULONG GetTimerResolution() {
   ULONG minimum, maximum, current;
   QueryTimerResolution(&minimum, &maximum, &current);
   return current;
+}
+
+static inline void timeradd(struct timespec* c, 
+                            const struct timespec* a,
+                            const struct timespec* b)
+{
+    c->tv_sec = a->tv_sec + b->tv_sec;
+    c->tv_nsec = a->tv_nsec + b->tv_nsec;
+    if (c->tv_nsec >= POW10_9) {
+        c->tv_sec++;
+        c->tv_nsec -= POW10_9;
+    }
 }
 
 int main(int ac, char**av)
