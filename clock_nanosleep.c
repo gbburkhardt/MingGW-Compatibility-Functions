@@ -23,9 +23,9 @@
 */
 
 #include <errno.h>
+#include <stdio.h>
 #include <time.h>
 #include <windows.h>
-#include <stdio.h>
 #include <stdbool.h>
 #include "pthread.h"
 #include "pthread_time.h"
@@ -114,7 +114,7 @@ bool haveHighResTimer()
 
 /**
  * Sleep for the specified time.
- * @param  clock_id This argument should always be CLOCK_REALTIME (0).
+ * @param  clock_id: CLOCK_REALTIME or CLOCK_MONOTONIC
  * @param  flags 0 for relative sleep interval, others for absolute waking up.
  * @param  request The desired sleep interval or absolute waking up time.
  * @param  remain The remain amount of time to sleep.
@@ -181,7 +181,7 @@ int clock_nanosleep(clockid_t clock_id, int flags,
         if (remain) clock_gettime(CLOCK_MONOTONIC, &then);
 
         // Set a timer
-        int retval;
+        int retval = 0;
         if (!SetWaitableTimer(hTimer, &liDueTime, 0, 0, 0, 0)) {
             printLastError(__func__, __LINE__);
             retval = lc_set_errno(ENOTSUP);
@@ -192,7 +192,6 @@ int clock_nanosleep(clockid_t clock_id, int flags,
                 printLastError(__func__, __LINE__);
                 retval = lc_set_errno(ENOTSUP);
             }
-            retval = 0;
         }
         
         CloseHandle(hTimer);
